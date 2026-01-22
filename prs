@@ -1,0 +1,191 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'open3'
+
+NAME = 'prs'
+
+# Fork-based workflow: the `git remote` label for your fork
+FORK_REMOTE = 'maskray'
+# github username of the fork owner
+FORK_OWNER = 'MaskRay'
+
+class PRShadow
+  def initialize
+    @branch = sh('git', 'rev-parse', '--abbrev-ref', 'HEAD').strip
+    detect_workflow
+  end
+
+  def run(args)
+    case args[0]
+    when 'init'
+      draft = args.delete('--draft')
+      init(args[1] || @branch, draft: draft)
+    when 'push'
+      force = args.delete('--force') || args.delete('-f')
+      push(args[1..].join(' '), force: force)
+    when 'status' then status
+    when 'desc'   then desc
+    when 'gh'     then gh(args[1..])
+    else abort "Usage: #{NAME} <init [--draft] [branch] | push [--force] <message> | status | desc | gh args...>"
+    end
+  end
+
+  private
+
+  def detect_workflow
+    repo_info = JSON.parse(sh('gh', 'repo', 'view', '--json', 'nameWithOwner,url'))
+    # e.g., llvm/llvm-project
+    @upstream = repo_info['nameWithOwner']
+    # e.g., https://github.com
+    @host = repo_info['url'][%r{^https?://[^/]+}]
+    # Detect main branch: prefer main, fall back to master
+    _, _, status = Open3.capture3('git', 'rev-parse', '--verify', 'origin/main')
+    @main_branch = status.success? ? 'main' : 'master'
+    if @branch =~ %r{^(users?/[^/]+)/(.+)$}
+      # Same-repo workflow: For local user/name/feature, push user/name/pr/feature to origin
+      @remote = 'origin'
+      @fork_owner = nil
+    else
+      # Fork-based workflow: For local feature, push pr/feature to FORK_REMOTE
+      @remote = FORK_REMOTE
+      @fork_owner = FORK_OWNER
+    end
+  end
+
+  def pr_branch_for(branch)
+    if branch =~ %r{^(users?/[^/]+)/(.+)$}
+      "#{$1}/pr/#{$2}"
+    else
+      "pr/#{branch}"
+    end
+  end
+
+  def pr_branch = @pr_branch ||= branch_config("prsync-branch")
+  def pr_number = @pr_number ||= branch_config("prsync-pr")
+  def branch_config(key) = Open3.capture3('git', 'config', '--get', "branch.#{@branch}.#{key}")[0].strip
+
+  def require_pr!
+    abort "Not initialized. Run: #{NAME} init" if pr_branch.empty?
+    abort "No PR associated. Run: #{NAME} init" if pr_number.empty?
+  end
+
+  def init(branch, draft: false)
+    abort "Cannot use on #{branch}" if %w[main master].include?(branch)
+    abort "Already initialized" unless branch_config("prsync-branch").empty?
+
+    pr_br = pr_branch_for(branch)
+    merge_base = sh('git', 'merge-base', "origin/#{@main_branch}", branch).strip
+    sh('git', 'branch', pr_br, 'HEAD')
+    sh('git', 'config', "branch.#{branch}.prsync-branch", pr_br)
+    sh('git', 'config', "branch.#{branch}.prsync-merge-base", merge_base)
+
+    puts "Pushing #{pr_br}..."
+    sh('git', 'push', '-u', @remote, "#{pr_br}:#{pr_br}")
+
+    puts "Creating #{draft ? 'draft ' : ''}PR..."
+    head = @fork_owner ? "#{@fork_owner}:#{pr_br}" : pr_br
+    gh_args = ['gh', 'pr', 'create', '--repo', @upstream, '--head', head, '--base', @main_branch, '--fill']
+    gh_args << '--draft' if draft
+    url = sh(*gh_args).strip
+    pr_num = url[%r{/pull/(\d+)}, 1] or abort "Could not parse PR number from: #{url}"
+    sh('git', 'config', "branch.#{branch}.prsync-pr", pr_num)
+
+    puts "Created: #{url}"
+  end
+
+  def push(message, force: false)
+    abort "Usage: #{NAME} push <message>" if message.empty?
+    abort "Not initialized" if pr_branch.empty?
+
+    local_tree = sh('git', 'rev-parse', 'HEAD^{tree}').strip
+    pr_head = sh('git', 'rev-parse', pr_branch).strip rescue abort("PR branch '#{pr_branch}' not found")
+    pr_tree = sh('git', 'rev-parse', "#{pr_head}^{tree}").strip
+
+    if local_tree != pr_tree
+      merge_base = sh('git', 'merge-base', "origin/#{@main_branch}", @branch).strip
+      prev_merge_base = branch_config("prsync-merge-base")
+      rebased = prev_merge_base != merge_base
+
+      parents = ['-p', pr_head]
+      parents += ['-p', merge_base] if rebased
+
+      new_commit = sh('git', 'commit-tree', local_tree, *parents, '-m', message).strip
+      sh('git', 'update-ref', "refs/heads/#{pr_branch}", new_commit)
+      sh('git', 'config', "branch.#{@branch}.prsync-merge-base", merge_base) if rebased
+    end
+
+    # Always push: local pr branch may be ahead of remote even if trees match.
+    push_args = ['git', 'push', @remote, "#{pr_branch}:#{pr_branch}"]
+    push_args.insert(2, '--force') if force
+    stdout, stderr, status = Open3.capture3(*push_args)
+    unless status.success?
+      if stderr.include?('non-fast-forward') || stderr.include?('fetch first')
+        abort "Push rejected: remote has diverged. Rerun with --force to overwrite"
+      end
+      abort "git push failed: #{stderr}"
+    end
+    puts "PR: #{@host}/#{@upstream}/pull/#{pr_number}"
+    if stderr.include?('Everything up-to-date')
+      puts "Already up to date"
+    else
+      puts "Pushed"
+    end
+  end
+
+  def status
+    puts "Branch: #{@branch}"
+    puts pr_branch.empty? ? "Not initialized" : "PR: ##{pr_number} (#{pr_branch})"
+    return if pr_branch.empty?
+
+    local_tree = sh('git', 'rev-parse', 'HEAD^{tree}').strip
+    pr_tree = sh('git', 'rev-parse', "#{pr_branch}^{tree}").strip rescue nil
+    puts pr_tree.nil? ? "PR branch not found locally" : local_tree == pr_tree ? "Up to date" : "Pending sync"
+  end
+
+  def desc
+    require_pr!
+
+    local_title, local_body = sh('git', 'log', '-1', '--format=%s%x00%b').split("\0", 2).map(&:strip)
+    pr = JSON.parse(sh('gh', 'pr', 'view', pr_number, '--repo', @upstream, '--json', 'title,body'))
+
+    if local_title == pr['title'] && local_body == pr['body']
+      puts "Already matches."
+      return
+    end
+
+    show_diff("Title: #{pr['title']}\n\n#{pr['body']}", "Title: #{local_title}\n\n#{local_body}")
+
+    print "\nUpdate? [y/N] "
+    return puts "Aborted." unless $stdin.gets&.strip&.downcase == 'y'
+
+    sh('gh', 'pr', 'edit', pr_number, '--repo', @upstream, '--title', local_title, '--body', local_body)
+    puts "Updated."
+  end
+
+  def show_diff(old_text, new_text)
+    require 'tempfile'
+    Tempfile.create('old') do |f1|
+      Tempfile.create('new') do |f2|
+        f1.write(old_text); f1.flush
+        f2.write(new_text); f2.flush
+        system('diff', '-u', '--color=auto', '--label', 'current', f1.path, '--label', 'new', f2.path)
+      end
+    end
+  end
+
+  def gh(args)
+    require_pr!
+    abort "Usage: #{NAME} gh <command>" if args.empty?
+    exec('gh', 'pr', *args, '--repo', @upstream, pr_number)
+  end
+
+  def sh(*args)
+    stdout, stderr, status = Open3.capture3(*args)
+    raise "#{args.join(' ')} failed: #{stderr}" unless status.success?
+    stdout
+  end
+end
+
+require 'json'
+PRShadow.new.run(ARGV)
