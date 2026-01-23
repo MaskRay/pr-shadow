@@ -76,7 +76,11 @@ For branches matching `user/<username>/<feature>` or `users/<name>/<feature>`:
 This is useful for repos where contributors push branches directly instead of using forks.
 GitHub Enterprise support**: Host is auto-detected from repository URL
 
-## Requirements
+## Limitations
+
+**Stacked PRs**: pr-shadow is designed for single PRs targeting main/master. For stacked PRs, use pr-shadow for the first patch and rebase/force-push for dependent patches.
+
+## Dependencies
 
 - Ruby
 - [gh](https://cli.github.com/) (GitHub CLI)
