@@ -98,11 +98,14 @@ class PRShadow
     abort "Usage: #{NAME} push <message>" if message.empty?
     abort "Not initialized" if pr_branch.empty?
 
+    puts "PR: #{@host}/#{@upstream}/pull/#{pr_number} (#{@remote}/#{pr_branch})"
+
     local_tree = sh('git', 'rev-parse', 'HEAD^{tree}').strip
     pr_head = sh('git', 'rev-parse', pr_branch).strip rescue abort("PR branch '#{pr_branch}' not found")
     pr_tree = sh('git', 'rev-parse', "#{pr_head}^{tree}").strip
 
     if local_tree != pr_tree
+      puts "Creating commit on #{pr_branch}..."
       merge_base = sh('git', 'merge-base', "origin/#{@main_branch}", @branch).strip
       prev_merge_base = branch_config("prsync-merge-base")
       rebased = prev_merge_base != merge_base
@@ -118,6 +121,7 @@ class PRShadow
     # Always push: local pr branch may be ahead of remote even if trees match.
     push_args = ['git', 'push', @remote, "#{pr_branch}:#{pr_branch}"]
     push_args.insert(2, '--force') if force
+    puts "Running #{push_args.join(' ')}"
     stdout, stderr, status = Open3.capture3(*push_args)
     unless status.success?
       if stderr.include?('non-fast-forward') || stderr.include?('fetch first')
@@ -125,7 +129,6 @@ class PRShadow
       end
       abort "git push failed: #{stderr}"
     end
-    puts "PR: #{@host}/#{@upstream}/pull/#{pr_number}"
     if stderr.include?('Everything up-to-date')
       puts "Already up to date"
     else

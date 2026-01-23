@@ -1,6 +1,7 @@
 # pr-shadow
 
 Maintain a shadow branch for GitHub PRs that never requires force-pushing.
+This addresses pain points related to GitHub's branch-centric workflow: <https://maskray.me/blog/2023-09-09-reflections-on-llvm-switch-to-github-pull-requests#patch-evolution>
 
 ## Problem
 
@@ -8,7 +9,7 @@ When working on PRs, you often rebase, amend, and rewrite history locally. This 
 
 ## Solution
 
-prs maintains a separate PR branch that only receives commits (never force-pushed). You work freely on your local branch (rebase, amend, squash), then sync to the PR branch with a commit that captures the new state.
+pr-shadow maintains a separate PR branch that only receives commits (never force-pushed). You work freely on your local branch (rebase, amend, squash), then sync to the PR branch using `git commit-tree` to create a commit with the same tree but parented to the previous PR HEAD.
 
 ```
 Local branch (feature)     PR branch (pr/feature)
@@ -20,6 +21,9 @@ Local branch (feature)     PR branch (pr/feature)
 ```
 
 Reviewers see clean diffs between C1 and C2, even though the underlying commits were rewritten.
+
+When a rebase is detected (`merge-base` with main/master changed), the new PR commit is created as a merge commit with the new merge-base as the second parent.
+GitHub displays these as "condensed" merges, preserving the diff view for reviewers.
 
 ## Usage
 
@@ -36,6 +40,7 @@ git commit --amend
 
 # Sync to PR (message required)
 prs push "Fix bug"
+prs push --force "Rewrite"  # Force push if remote diverged
 
 # Update PR title/body from local commit message
 prs desc
@@ -62,23 +67,16 @@ For branches like `feature`, `fix-bug`, etc:
 
 ### Same-repo
 
-For branches matching `user/<name>/<feature>` or `users/<name>/<feature>`:
+For branches matching `user/<username>/<feature>` or `users/<name>/<feature>`:
 
-- Local branch: `user/maskray/feature`
-- PR branch: `user/maskray/pr/feature` (pushed to `origin`)
-- Creates PR from `user/maskray/pr/feature` to `main` in the same repo
+- Local branch: `user/<username>/feature`
+- PR branch: `user/<username>/pr/feature` (pushed to `origin`)
+- Creates PR from `user/<username>/pr/feature` to `main` in the same repo
 
-This is useful for monorepos where contributors push branches directly instead of using forks.
+This is useful for repos where contributors push branches directly instead of using forks.
+GitHub Enterprise support**: Host is auto-detected from repository URL
 
 ## Requirements
 
 - Ruby
 - [gh](https://cli.github.com/) (GitHub CLI)
-
-## How it works
-
-`prs push` creates a commit using `git commit-tree`:
-- Parent: previous PR branch HEAD
-- Tree: matches local branch exactly
-
-When a rebase is detected (merge-base with `origin/main` changed), a second parent is added linking to the local HEAD. GitHub shows these as "condensed" merge commits.
