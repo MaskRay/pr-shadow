@@ -159,8 +159,8 @@ class PRShadow
 
     show_diff("Title: #{pr['title']}\n\n#{pr['body']}", "Title: #{local_title}\n\n#{local_body}")
 
-    print "\nUpdate? [y/N] "
-    return puts "Aborted." unless $stdin.gets&.strip&.downcase == 'y'
+    print "\nUpdate? [Y/n] "
+    return puts "Aborted." if $stdin.gets&.strip&.downcase == 'n'
 
     sh('gh', 'pr', 'edit', pr_number, '--repo', @upstream, '--title', local_title, '--body', local_body)
     puts "Updated."
