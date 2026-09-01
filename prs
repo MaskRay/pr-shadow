@@ -75,7 +75,7 @@ class PRShadow
     abort "Already initialized" unless branch_config("prsync-branch").empty?
 
     pr_br = pr_branch_for(branch)
-    merge_base = sh('git', 'merge-base', "origin/#{@main_branch}", branch).strip
+    merge_base = main_merge_base(branch)
     sh('git', 'branch', pr_br, 'HEAD')
     sh('git', 'config', "branch.#{branch}.prsync-branch", pr_br)
     sh('git', 'config', "branch.#{branch}.prsync-merge-base", merge_base)
@@ -103,7 +103,7 @@ class PRShadow
     local_tree, pr_head, pr_tree = sh('git', 'rev-parse', 'HEAD^{tree}', pr_branch, "#{pr_branch}^{tree}").split("\n").map(&:strip) rescue abort("PR branch '#{pr_branch}' not found")
 
     if local_tree != pr_tree
-      merge_base = sh('git', 'merge-base', "origin/#{@main_branch}", @branch).strip
+      merge_base = main_merge_base(@branch)
       prev_merge_base = branch_config("prsync-merge-base")
       rebased = !prev_merge_base.empty? && prev_merge_base != merge_base
 
@@ -210,6 +210,25 @@ class PRShadow
       'git', 'merge-tree', '--write-tree', "--merge-base=#{base}", ours, theirs
     )
     status.success? ? stdout.lines.first&.strip : nil
+  end
+
+  # merge-base of rev with the main branch. A stale origin/<main> hides commits
+  # rev is already based on, which would then land in the PR diff.
+  def main_merge_base(rev)
+    mb = sh('git', 'merge-base', "origin/#{@main_branch}", rev).strip
+    _out, _err, status = Open3.capture3('git', 'rev-parse', '--verify', '--quiet',
+                                        "refs/heads/#{@main_branch}")
+    return mb unless status.success?
+
+    # Local <main> is evidence only when rev is based past origin/<main>.
+    local_mb = sh('git', 'merge-base', @main_branch, rev).strip
+    return mb if local_mb == mb
+    return mb unless system('git', 'merge-base', '--is-ancestor', mb, local_mb)
+
+    behind = sh('git', 'rev-list', '--count', "#{mb}..#{local_mb}").strip
+    abort "origin/#{@main_branch} is stale: #{rev} is based on #{local_mb[0, 12]}, " \
+          "#{behind} commit(s) ahead of it.\n" \
+          "Those commits would show up as part of the PR. Run: git fetch origin"
   end
 
   def sh(*args)
